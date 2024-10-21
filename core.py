@@ -1,0 +1,200 @@
+import sys
+import os
+import random
+import string
+import hashlib
+import logging
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QPushButton, QListWidget, QMessageBox, QProgressBar
+)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
+
+logging.basicConfig(filename="redact.log", level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def secure_shred_file(file_path, passes=7):
+    try:
+        # Tried to delete system32
+        if not os.path.exists(file_path) or not os.access(file_path, os.W_OK):
+            logging.error(f"File not accessible: {file_path}")
+            return False
+
+        file_size = os.path.getsize(file_path)
+
+        chunk_size = 64 * 1024
+        with open(file_path, 'r+b') as file:
+            for i in range(passes):
+                file.seek(0)
+                for _ in range(0, file_size, chunk_size):
+                    data = os.urandom(chunk_size) if i % 2 == 0 else b'\xFF' * chunk_size
+                    file.write(data)
+                    file.flush()
+                    os.fsync(file.fileno())
+
+            file.seek(0)
+            for _ in range(0, file_size, chunk_size):
+                file.write(b'\x00' * chunk_size)
+                file.flush()
+                os.fsync(file.fileno())
+
+        with open(file_path, 'w') as file:
+            file.truncate(0)
+            file.flush()
+            os.fsync(file.fileno())
+
+        # Basically an automated version of bashing your keyboard to rename the files
+        new_name = ''.join(random.choices(string.ascii_letters + string.digits, k=hashlib.sha256(file_path.encode()).digest_size))
+        new_path = os.path.join(os.path.dirname(file_path), new_name)
+        os.rename(file_path, new_path)
+
+        return new_path
+
+    except Exception as e:
+        logging.error(f"Error processing file {file_path}: {e}")
+        return None
+
+class ShredderThread(QThread):
+    update_progress = pyqtSignal(int)
+    update_message = pyqtSignal(str)
+    shred_complete = pyqtSignal()
+    shred_stopped = pyqtSignal()
+
+    def __init__(self, files, parent=None):
+        super().__init__(parent)
+        self.files_to_shred = files
+        self._stop_flag = False
+        self.shredded_files = []
+
+    def stop(self):
+        self._stop_flag = True
+
+    def run(self):
+        total_files = len(self.files_to_shred)
+        if total_files == 0:
+            logging.error("No files to redact.")
+            self.shred_complete.emit()
+            return
+        
+        for index, file_path in enumerate(self.files_to_shred):
+            if self._stop_flag:
+                self.shred_stopped.emit()
+                logging.info("Redacting process stopped by user.")
+                return
+
+            shredded_path = secure_shred_file(file_path)
+            if shredded_path:
+                self.shredded_files.append(shredded_path)
+                self.update_message.emit(f"Redacted: {file_path}")
+            else:
+                self.update_message.emit(f"Failed to redact: {file_path}")
+
+            self.update_progress.emit(int((index + 1) / total_files * 100))
+
+        self.shred_complete.emit()
+
+class FileShredderApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle("Raven Redact")
+        self.setGeometry(300, 300, 500, 400)
+        self.setAcceptDrops(True)
+
+        self.layout = QVBoxLayout()
+
+        self.file_list = QListWidget(self)
+        self.layout.addWidget(self.file_list)
+
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setValue(0)
+        self.layout.addWidget(self.progress_bar)
+
+        self.shred_button = QPushButton('Shred Files', self)
+        self.shred_button.clicked.connect(self.start_shredding)
+        self.layout.addWidget(self.shred_button)
+
+        self.stop_button = QPushButton('Stop Shredding', self)
+        self.stop_button.clicked.connect(self.stop_shredding)
+        self.stop_button.setEnabled(False)
+        self.layout.addWidget(self.stop_button)
+
+        self.setLayout(self.layout)
+
+        self.files_to_shred = []
+        self.shredder_thread = None
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            file_path = url.toLocalFile()
+            if os.path.isfile(file_path):
+                self.files_to_shred.append(file_path)
+                self.file_list.addItem(file_path)
+            else:
+                logging.warning(f"Invalid file or directory dropped: {file_path}")
+
+    @pyqtSlot(str)
+    def update_message(self, message):
+        self.file_list.addItem(message)
+        if "Shredded:" in message:
+            items = self.file_list.findItems(message.replace("Shredded: ", ""), Qt.MatchExactly)
+            if items:
+                for item in items:
+                    self.file_list.takeItem(self.file_list.row(item))
+
+    @pyqtSlot(int)
+    def update_progress(self, value):
+        self.progress_bar.setValue(value)
+        logging.info(f"Progress: {value}%")
+
+    @pyqtSlot()
+    def shred_complete(self):
+        QMessageBox.information(self, "Success", "Redaction process completed.")
+        self.reset_ui()
+        logging.info("Redaction process completed successfully.")
+
+    @pyqtSlot()
+    def shred_stopped(self):
+        QMessageBox.warning(self, "Stopped", "Redaction process was stopped.")
+        self.reset_ui()
+        logging.info("Redaction process was stopped by the user.")
+
+    def start_shredding(self):
+        if not self.files_to_shred:
+            QMessageBox.warning(self, "No Files", "No files to redact.")
+            return
+
+        self.setAcceptDrops(False)
+        self.shred_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+
+        self.shredder_thread = ShredderThread(self.files_to_shred)
+        self.shredder_thread.update_message.connect(self.update_message)
+        self.shredder_thread.update_progress.connect(self.update_progress)
+        self.shredder_thread.shred_complete.connect(self.shred_complete)
+        self.shredder_thread.shred_stopped.connect(self.shred_stopped)
+        self.shredder_thread.start()
+        logging.info("Redaction process started.")
+
+    def stop_shredding(self):
+        if self.shredder_thread and self.shredder_thread.isRunning():
+            self.shredder_thread.stop()
+
+    def reset_ui(self):
+        self.file_list.clear()
+        self.files_to_shred = []
+        self.progress_bar.setValue(0)
+        self.setAcceptDrops(True)
+        self.shred_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.shredder_thread = None
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    ex = FileShredderApp()
+    ex.show()
+    sys.exit(app.exec_())

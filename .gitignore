@@ -1,0 +1,6 @@
+# PyInstaller build artifacts
+/dist/
+/build/
+__pycache__/
+*.pyc
+.DS_Store

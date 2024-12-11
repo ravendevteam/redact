@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QListWidget, QMessageBox, QProgressBar, QFileDialog, QDialog, QLabel, QComboBox, QHBoxLayout, QToolTip
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QIcon
 
 logging.basicConfig(
     filename="redact.log",
@@ -127,6 +128,8 @@ class ShredderThread(QThread):
 class FileShredderApp(QWidget):
     def __init__(self):
         super().__init__()
+        app_icon = QIcon('ICON.ico')
+        self.setWindowIcon(app_icon)
         self.initUI()
 
     def initUI(self):
@@ -197,6 +200,8 @@ class FileShredderApp(QWidget):
 
     def show_pass_dialog(self):
         dialog = QDialog(self)
+        app_icon = QIcon('ICON.ico')
+        dialog.setWindowIcon(app_icon)
         dialog.setWindowTitle("Number of Passes")
         dialog.setGeometry(400, 400, 350, 150)
 

@@ -11,7 +11,7 @@ Made for Windows 10/11.
 ## Installation
 See [Releases](https://github.com/ravendevteam/redact/releases). Download the latest version.
 
-To compile from source, make sure you have Python 3.12.4 or greater, and PyInstaller, then run either `build.bat`.
+To compile from source, make sure you have Python 3.12.4 or greater, and PyInstaller, then run `build.bat`.
 
 ## Authors & Contributors
 

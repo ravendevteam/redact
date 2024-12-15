@@ -17,6 +17,33 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
+def loadStyle():
+    """Load CSS styles globally for the application."""
+    user_css_path = os.path.join(os.path.expanduser("~"), "rdstyle.css")
+    stylesheet = None
+    if os.path.exists(user_css_path):
+        try:
+            with open(user_css_path, 'r') as css_file:
+                stylesheet = css_file.read()
+            print(f"Loaded user CSS style from: {user_css_path}")
+        except Exception as e:
+            print(f"Error loading user CSS: {e}")
+    else:
+        css_file_path = os.path.join(os.path.dirname(__file__), 'style.css')
+        if getattr(sys, 'frozen', False):
+            css_file_path = os.path.join(sys._MEIPASS, 'style.css')
+        try:
+            with open(css_file_path, 'r') as css_file:
+                stylesheet = css_file.read()
+        except FileNotFoundError:
+            print(f"Default CSS file not found: {css_file_path}")
+    if stylesheet:
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(stylesheet)
+        else:
+            print("No QApplication instance found. Stylesheet not applied.")
+
 def secure_shred_file(file_path, passes=7):
     try:
         if not os.path.exists(file_path) or not os.access(file_path, os.W_OK):
@@ -280,6 +307,7 @@ class FileShredderApp(QWidget):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    loadStyle()
     ex = FileShredderApp()
     ex.show()
     sys.exit(app.exec_())

@@ -23,6 +23,13 @@ See [Releases](https://github.com/ravendevteam/redact/releases). Download the la
 
 To compile from source, make sure you have Python 3.12.4 or greater, and Nuitka, then run `build.bat`.
 
+## Personalize The Application
+
+To personalize the application, create **rdstyle.css** in your user folder (*ex: C:\Users\Paul\rdstyle.css*). Edit the file to include any CSS styling you want, save your changes, then restart Redact. If done correctly, it should load your custom styling.
+
+> [!NOTE]
+> Redact's UI is built with Qt5 (*PyQt5, to be specific*). You can read the documentation for Qt5 CSS styling [here](https://doc.qt.io/qt-5/stylesheet-syntax.html).
+
 ## Authors & Contributors
 
 - [Raven Development Team](https://ravendevteam.org/)

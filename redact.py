@@ -43,13 +43,17 @@ def loadStyle():
         else:
             print("No QApplication instance found. Stylesheet not applied.")
 
+
 def secure_shred_file(file_path, passes=7):
     try:
-        if not os.path.exists(file_path) or not os.access(file_path, os.W_OK):
-            logging.error(f"File not accessible: {file_path}")
-            return False
+        if not os.path.exists(file_path):
+            return (False, f"File does not exist: {file_path}")
+        if not os.access(file_path, os.W_OK):
+            return (False, f"No write permission for file: {file_path}")
+
         file_size = os.path.getsize(file_path)
         chunk_size = 64 * 1024
+
         with open(file_path, 'r+b') as file:
             for i in range(passes):
                 file.seek(0)
@@ -58,23 +62,29 @@ def secure_shred_file(file_path, passes=7):
                     file.write(data)
                     file.flush()
                     os.fsync(file.fileno())
+
             file.seek(0)
             for _ in range(0, file_size, chunk_size):
                 file.write(b'\x00' * chunk_size)
                 file.flush()
                 os.fsync(file.fileno())
+
         with open(file_path, 'w') as file:
             file.truncate(0)
             file.flush()
             os.fsync(file.fileno())
-        new_name = ''.join(random.choices(string.ascii_letters + string.digits, k=hashlib.sha256(file_path.encode()).digest_size))
+
+        new_name = ''.join(
+            random.choices(string.ascii_letters + string.digits, k=hashlib.sha256(file_path.encode()).digest_size))
         new_path = os.path.join(os.path.dirname(file_path), new_name)
         os.rename(file_path, new_path)
         logging.info(f"Redacted: {file_path} -> Renamed to: {new_path}")
-        return new_path
+        return (True, new_path)
+
     except Exception as e:
-        logging.error(f"Error processing file {file_path}: {e}")
-        return None
+        error_msg = f"Error processing file {file_path}: {str(e)}"
+        logging.error(error_msg)
+        return (False, error_msg)
 
 class DirectoryScanner(QThread):
     update_progress = pyqtSignal(int)
@@ -119,21 +129,26 @@ class ShredderThread(QThread):
             logging.error("No files to redact.")
             self.shred_complete.emit()
             return
+
         success_count = 0
         failure_count = 0
+
         for index, file_path in enumerate(self.files_to_shred):
             if self._stop_flag:
                 self.shred_stopped.emit()
                 logging.info("Redaction process stopped by user.")
                 return
-            shredded_path = secure_shred_file(file_path, self.passes)
-            if shredded_path:
+
+            success, result = secure_shred_file(file_path, self.passes)
+            if success:
                 success_count += 1
                 self.update_message.emit(f"Redacted: {file_path}")
             else:
                 failure_count += 1
-                self.update_message.emit(f"Failed to redact: {file_path}")
+                self.update_message.emit(f"Failed: {result}")
+
             self.update_progress.emit(int((index + 1) / total_files * 100))
+
         logging.info(f"Redaction Summary: Successful: {success_count}, Failed: {failure_count}")
         self.shred_complete.emit()
 
@@ -164,7 +179,19 @@ class FileShredderApp(QWidget):
         self.setLayout(self.layout)
         self.files_to_shred = []
         self.shredder_thread = None
+        self.file_list.keyPressEvent = self.list_key_press_event
 
+    def list_key_press_event(self, event):
+        if event.key() == Qt.Key_Delete:
+            current_item = self.file_list.currentItem()
+            if current_item:
+                file_path = current_item.text()
+                row = self.file_list.row(current_item)
+                self.file_list.takeItem(row)
+                if file_path in self.files_to_shred:
+                    self.files_to_shred.remove(file_path)
+        else:
+            QListWidget.keyPressEvent(self.file_list, event)
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()

@@ -34,3 +34,4 @@ To personalize the application, create **rdstyle.css** in your user folder (*ex:
 
 - [Raven Development Team](https://ravendevteam.org/)
 - [Icons by Icons8](https://icons8.com/)
+- [urbanawakening](https://github.com/urbanawakening)

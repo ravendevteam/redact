@@ -43,7 +43,6 @@ def loadStyle():
         else:
             print("No QApplication instance found. Stylesheet not applied.")
 
-
 def secure_shred_file(file_path, passes=7):
     try:
         if not os.path.exists(file_path):

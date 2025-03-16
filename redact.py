@@ -4,6 +4,9 @@ import random
 import string
 import hashlib
 import logging
+import base64
+import time
+import math
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QListWidget, QMessageBox, QProgressBar, QFileDialog, QDialog, QLabel, QComboBox, QHBoxLayout, QToolTip
 )
@@ -43,7 +46,7 @@ def loadStyle():
         else:
             print("No QApplication instance found. Stylesheet not applied.")
 
-def secure_shred_file(file_path, passes=7):
+def secure_shred_file(file_path, passes=7, progress_callback=None):
     try:
         if not os.path.exists(file_path):
             return (False, f"File does not exist: {file_path}")
@@ -52,6 +55,10 @@ def secure_shred_file(file_path, passes=7):
 
         file_size = os.path.getsize(file_path)
         chunk_size = 64 * 1024
+        
+        num_chunks = math.ceil(file_size / chunk_size) if file_size > 0 else 1
+        total_steps = passes * num_chunks + num_chunks
+        step = 0
 
         with open(file_path, 'r+b') as file:
             for i in range(passes):
@@ -61,29 +68,36 @@ def secure_shred_file(file_path, passes=7):
                     file.write(data)
                     file.flush()
                     os.fsync(file.fileno())
-
+                    step += 1
+                    if progress_callback:
+                        progress_callback(int(step / total_steps * 100))
             file.seek(0)
             for _ in range(0, file_size, chunk_size):
                 file.write(b'\x00' * chunk_size)
                 file.flush()
                 os.fsync(file.fileno())
-
+                step += 1
+                if progress_callback:
+                    progress_callback(int(step / total_steps * 100))
         with open(file_path, 'w') as file:
             file.truncate(0)
             file.flush()
             os.fsync(file.fileno())
-
-        new_name = ''.join(
-            random.choices(string.ascii_letters + string.digits, k=hashlib.sha256(file_path.encode()).digest_size))
+        if progress_callback:
+            progress_callback(100)
+            
+        new_name_random = ''.join(random.choices(string.ascii_letters + string.digits, k=hashlib.sha256(file_path.encode()).digest_size))
+        timestamp_str = str(int(time.time()))
+        timestamp_encoded = base64.urlsafe_b64encode(timestamp_str.encode()).decode().rstrip('=')
+        new_name = f"{timestamp_encoded}_{new_name_random}"
         new_path = os.path.join(os.path.dirname(file_path), new_name)
         os.rename(file_path, new_path)
         logging.info(f"Redacted: {file_path} -> Renamed to: {new_path}")
         return (True, new_path)
 
     except Exception as e:
-        error_msg = f"Error processing file {file_path}: {str(e)}"
-        logging.error(error_msg)
-        return (False, error_msg)
+        logging.exception(f"Error processing file {file_path}: {str(e)}")
+        return (False, f"Error processing file {file_path}: {str(e)}")
 
 class DirectoryScanner(QThread):
     update_progress = pyqtSignal(int)
@@ -110,6 +124,7 @@ class DirectoryScanner(QThread):
 class ShredderThread(QThread):
     update_progress = pyqtSignal(int)
     update_message = pyqtSignal(str)
+    update_file_progress = pyqtSignal(int)
     shred_complete = pyqtSignal()
     shred_stopped = pyqtSignal()
 
@@ -138,7 +153,12 @@ class ShredderThread(QThread):
                 logging.info("Redaction process stopped by user.")
                 return
 
-            success, result = secure_shred_file(file_path, self.passes)
+            self.update_file_progress.emit(0)
+
+            success, result = secure_shred_file(
+                file_path, self.passes,
+                progress_callback=lambda progress: self.update_file_progress.emit(progress)
+            )
             if success:
                 success_count += 1
                 self.update_message.emit(f"Redacted: {file_path}")
@@ -156,6 +176,9 @@ class FileShredderApp(QWidget):
         super().__init__()
         app_icon = QIcon('ICON.ico')
         self.setWindowIcon(app_icon)
+        self.files_to_shred = []
+        self.files_to_shred_norm = set()
+        self.shredder_thread = None
         self.initUI()
 
     def initUI(self):
@@ -165,6 +188,11 @@ class FileShredderApp(QWidget):
         self.layout = QVBoxLayout()
         self.file_list = QListWidget(self)
         self.layout.addWidget(self.file_list)
+        
+        self.file_progress_bar = QProgressBar(self)
+        self.file_progress_bar.setValue(0)
+        self.layout.addWidget(self.file_progress_bar)
+        
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
         self.layout.addWidget(self.progress_bar)
@@ -176,8 +204,6 @@ class FileShredderApp(QWidget):
         self.stop_button.setEnabled(False)
         self.layout.addWidget(self.stop_button)
         self.setLayout(self.layout)
-        self.files_to_shred = []
-        self.shredder_thread = None
         self.file_list.keyPressEvent = self.list_key_press_event
 
     def list_key_press_event(self, event):
@@ -187,10 +213,14 @@ class FileShredderApp(QWidget):
                 file_path = current_item.text()
                 row = self.file_list.row(current_item)
                 self.file_list.takeItem(row)
+                normalized_path = os.path.normcase(os.path.abspath(file_path))
                 if file_path in self.files_to_shred:
                     self.files_to_shred.remove(file_path)
+                if normalized_path in self.files_to_shred_norm:
+                    self.files_to_shred_norm.remove(normalized_path)
         else:
             QListWidget.keyPressEvent(self.file_list, event)
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -199,8 +229,13 @@ class FileShredderApp(QWidget):
         for url in event.mimeData().urls():
             file_path = url.toLocalFile()
             if os.path.isfile(file_path):
-                self.files_to_shred.append(file_path)
-                self.file_list.addItem(file_path)
+                normalized_path = os.path.normcase(os.path.abspath(file_path))
+                if normalized_path not in self.files_to_shred_norm:
+                    self.files_to_shred.append(file_path)
+                    self.files_to_shred_norm.add(normalized_path)
+                    self.file_list.addItem(file_path)
+                else:
+                    logging.info(f"File already in list, skipping: {file_path}")
             elif os.path.isdir(file_path):
                 self.scan_directory(file_path)
             else:
@@ -223,8 +258,13 @@ class FileShredderApp(QWidget):
         dialog.exec()
 
     def add_file_to_list(self, file_path):
-        self.files_to_shred.append(file_path)
-        self.file_list.addItem(file_path)
+        normalized_path = os.path.normcase(os.path.abspath(file_path))
+        if normalized_path not in self.files_to_shred_norm:
+            self.files_to_shred.append(file_path)
+            self.files_to_shred_norm.add(normalized_path)
+            self.file_list.addItem(file_path)
+        else:
+            logging.info(f"File already in list, skipping: {file_path}")
 
     def show_pass_dialog(self):
         dialog = QDialog(self)
@@ -246,9 +286,22 @@ class FileShredderApp(QWidget):
         tooltip_label.setToolTip("Passes mean how many times the data is overwritten. More passes make it harder to recover the data.")
         layout.addWidget(tooltip_label)
         ok_button = QPushButton("OK")
-        ok_button.clicked.connect(lambda: self.start_shredding_with_passes(combo.currentIndex() + 3) or dialog.accept())
+        ok_button.clicked.connect(lambda: self.confirm_shredding(combo.currentIndex() + 3, dialog))
         layout.addWidget(ok_button)
         dialog.exec()
+
+    def confirm_shredding(self, passes, parent_dialog):
+        total_files = len(self.files_to_shred)
+        reply = QMessageBox.question(
+            self,
+            "Confirmation",
+            f"Are you sure you want to proceed with shredding {total_files} file{'s' if total_files != 1 else ''}? {'It' if total_files != 1 else 'They'} cannot be recovered afterwards!",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.start_shredding_with_passes(passes)
+            parent_dialog.accept()
 
     def start_shredding_with_passes(self, passes):
         if not self.files_to_shred:
@@ -260,6 +313,7 @@ class FileShredderApp(QWidget):
         self.shredder_thread = ShredderThread(self.files_to_shred, passes)
         self.shredder_thread.update_message.connect(self.update_message)
         self.shredder_thread.update_progress.connect(self.update_progress)
+        self.shredder_thread.update_file_progress.connect(self.update_file_progress)
         self.shredder_thread.shred_complete.connect(self.shred_complete)
         self.shredder_thread.shred_stopped.connect(self.shred_stopped)
         self.shredder_thread.start()
@@ -271,7 +325,9 @@ class FileShredderApp(QWidget):
     def reset_ui(self):
         self.file_list.clear()
         self.files_to_shred = []
+        self.files_to_shred_norm.clear()
         self.progress_bar.setValue(0)
+        self.file_progress_bar.setValue(0)
         self.setAcceptDrops(True)
         self.shred_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -286,6 +342,10 @@ class FileShredderApp(QWidget):
     @pyqtSlot(int)
     def update_progress(self, value):
         self.progress_bar.setValue(value)
+
+    @pyqtSlot(int)
+    def update_file_progress(self, value):
+        self.file_progress_bar.setValue(value)
 
     @pyqtSlot()
     def shred_complete(self):

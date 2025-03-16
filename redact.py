@@ -1,3 +1,4 @@
+""" Import necessary modules for the program to work """
 import sys
 import os
 import random
@@ -20,6 +21,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
+
+
+""" Utility function to load the stylesheet """
 def loadStyle():
     user_css_path = os.path.join(os.path.expanduser("~"), "rdstyle.css")
     stylesheet = None
@@ -46,6 +50,9 @@ def loadStyle():
         else:
             print("No QApplication instance found. Stylesheet not applied.")
 
+
+
+""" Utility function for file shredding """
 def secure_shred_file(file_path, passes=7, progress_callback=None):
     try:
         if not os.path.exists(file_path):
@@ -99,6 +106,9 @@ def secure_shred_file(file_path, passes=7, progress_callback=None):
         logging.exception(f"Error processing file {file_path}: {str(e)}")
         return (False, f"Error processing file {file_path}: {str(e)}")
 
+
+
+""" Create a class for directory scanning """
 class DirectoryScanner(QThread):
     update_progress = pyqtSignal(int)
     file_found = pyqtSignal(str)
@@ -121,6 +131,9 @@ class DirectoryScanner(QThread):
             self.update_progress.emit(progress)
         self.scan_complete.emit()
 
+
+
+""" Create a class for the file shredding thread """
 class ShredderThread(QThread):
     update_progress = pyqtSignal(int)
     update_message = pyqtSignal(str)
@@ -171,7 +184,10 @@ class ShredderThread(QThread):
         logging.info(f"Redaction Summary: Successful: {success_count}, Failed: {failure_count}")
         self.shred_complete.emit()
 
-class FileShredderApp(QWidget):
+
+
+""" Create a class for the UI """
+class Redact(QWidget):
     def __init__(self):
         super().__init__()
         app_icon = QIcon('ICON.ico')
@@ -357,9 +373,12 @@ class FileShredderApp(QWidget):
         QMessageBox.warning(self, "Stopped", "Redaction process was stopped.")
         self.reset_ui()
 
+
+
+""" Start the program """
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     loadStyle()
-    ex = FileShredderApp()
+    ex = Redact()
     ex.show()
     sys.exit(app.exec_())

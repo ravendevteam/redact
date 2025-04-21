@@ -8,6 +8,7 @@ import logging
 import base64
 import time
 import math
+import importlib.util
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QListWidget, QMessageBox, QProgressBar, QFileDialog, QDialog, QLabel, QComboBox, QHBoxLayout, QToolTip
 )
@@ -20,6 +21,30 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
+
+
+
+""" Utility function to load plugins """
+def load_plugins(app_context):
+    user_home = os.path.expanduser("~")
+    plugins_dir = os.path.join(user_home, "rdplugins")
+    os.makedirs(plugins_dir, exist_ok=True)
+    loaded_plugins = []
+    for filename in os.listdir(plugins_dir):
+        if filename.endswith(".py") and not filename.startswith("_"):
+            plugin_path = os.path.join(plugins_dir, filename)
+            mod_name = os.path.splitext(filename)[0]
+            spec = importlib.util.spec_from_file_location(mod_name, plugin_path)
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+                if hasattr(module, "register_plugin"):
+                    module.register_plugin(app_context)
+                    loaded_plugins.append(mod_name)
+                    print(f"Plugin '{mod_name}' loaded successfully from {plugins_dir}")
+            except Exception as e:
+                print(f"Failed to load plugin '{filename}' from {plugins_dir}: {e}")
+    return loaded_plugins
 
 
 
@@ -196,6 +221,8 @@ class Redact(QWidget):
         self.files_to_shred_norm = set()
         self.shredder_thread = None
         self.initUI()
+        app_context = {"main_window": self}
+        self.plugins = load_plugins(app_context)
 
     def initUI(self):
         self.setWindowTitle("Raven Redact")

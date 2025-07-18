@@ -1,4 +1,3 @@
-""" Import necessary modules for the program to work """
 import sys
 import os
 import random
@@ -8,12 +7,16 @@ import logging
 import base64
 import time
 import math
-import importlib.util
+import platform
+import ctypes
+from ctypes import wintypes
+import subprocess
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QListWidget, QMessageBox, QProgressBar, QFileDialog, QDialog, QLabel, QComboBox, QHBoxLayout, QToolTip
+    QApplication, QWidget, QVBoxLayout, QPushButton, QListWidget, QMessageBox, QProgressBar, QFileDialog, QDialog, QLabel, QComboBox, QHBoxLayout, QToolTip, QAction, QMenuBar
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QIcon
+import importlib.util
 
 logging.basicConfig(
     filename="redact.log",
@@ -24,7 +27,6 @@ logging.basicConfig(
 
 
 
-""" Utility function to load plugins """
 def load_plugins(app_context):
     user_home = os.path.expanduser("~")
     plugins_dir = os.path.join(user_home, "rdplugins")
@@ -48,7 +50,6 @@ def load_plugins(app_context):
 
 
 
-""" Utility function to load the stylesheet """
 def loadStyle():
     user_css_path = os.path.join(os.path.expanduser("~"), "rdstyle.css")
     stylesheet = None
@@ -77,63 +78,133 @@ def loadStyle():
 
 
 
-""" Utility function for file shredding """
-def secure_shred_file(file_path, passes=7, progress_callback=None):
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+CreateFileW = kernel32.CreateFileW
+CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+CreateFileW.restype = wintypes.HANDLE
+WriteFile = kernel32.WriteFile
+WriteFile.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD,
+                      ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+WriteFile.restype = wintypes.BOOL
+FlushFileBuffers = kernel32.FlushFileBuffers
+FlushFileBuffers.argtypes = [wintypes.HANDLE]
+FlushFileBuffers.restype = wintypes.BOOL
+CloseHandle = kernel32.CloseHandle
+CloseHandle.argtypes = [wintypes.HANDLE]
+CloseHandle.restype = wintypes.BOOL
+bcrypt = ctypes.WinDLL('bcrypt', use_last_error=True)
+BCryptGenRandom = bcrypt.BCryptGenRandom
+BCryptGenRandom.argtypes = [wintypes.HANDLE, wintypes.LPVOID,
+                            wintypes.ULONG, wintypes.ULONG]
+BCryptGenRandom.restype = wintypes.ULONG
+INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+GENERIC_WRITE = 0x40000000
+FILE_SHARE_ALL = 0x00000007
+OPEN_EXISTING = 3
+FILE_FLAG_NO_BUFFERING = 0x20000000
+FILE_FLAG_WRITE_THROUGH = 0x80000000
+BCRYPT_USE_SYSTEM_PREFERRED_RNG = 0x00000002
+
+
+
+def get_random_bytes(n):
+    buf = ctypes.create_string_buffer(n)
+    status = BCryptGenRandom(None, buf, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+    if status != 0:
+        raise OSError(status, "BCryptGenRandom failed")
+    return buf.raw
+
+
+
+def delete_vss_snapshots(drive_letter):
     try:
-        if not os.path.exists(file_path):
-            return (False, f"File does not exist: {file_path}")
-        if not os.access(file_path, os.W_OK):
-            return (False, f"No write permission for file: {file_path}")
+        is_admin = wintypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        is_admin = False
+    if not is_admin:
+        logging.info("Skipping VSS snapshot deletion: insufficient privileges.")
+        return
+    subprocess.run(
+        ['vssadmin', 'delete', 'shadows', f'/for={drive_letter}:', '/all', '/quiet'],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
-        file_size = os.path.getsize(file_path)
-        chunk_size = 64 * 1024
-        
-        num_chunks = math.ceil(file_size / chunk_size) if file_size > 0 else 1
-        total_steps = passes * num_chunks + num_chunks
-        step = 0
 
-        with open(file_path, 'r+b') as file:
-            for i in range(passes):
-                file.seek(0)
-                for _ in range(0, file_size, chunk_size):
-                    data = os.urandom(chunk_size) if i % 2 == 0 else b'\xFF' * chunk_size
-                    file.write(data)
-                    file.flush()
-                    os.fsync(file.fileno())
-                    step += 1
-                    if progress_callback:
-                        progress_callback(int(step / total_steps * 100))
-            file.seek(0)
-            for _ in range(0, file_size, chunk_size):
-                file.write(b'\x00' * chunk_size)
-                file.flush()
-                os.fsync(file.fileno())
-                step += 1
-                if progress_callback:
-                    progress_callback(int(step / total_steps * 100))
-        with open(file_path, 'w') as file:
-            file.truncate(0)
-            file.flush()
-            os.fsync(file.fileno())
+
+def overwrite_file(path, passes, chunk_size, progress_cb):
+    size = os.path.getsize(path)
+    total_ops = passes * ((size + chunk_size - 1) // chunk_size)
+    done = 0
+    handle = CreateFileW(
+        path,
+        GENERIC_WRITE,
+        FILE_SHARE_ALL,
+        None,
+        OPEN_EXISTING,
+        FILE_FLAG_WRITE_THROUGH,
+        None
+    )
+    if handle == INVALID_HANDLE_VALUE:
+        raise OSError("Failed to open file for overwrite")
+    for pass_num in range(passes):
+        offset = 0
+        while offset < size:
+            block = min(chunk_size, size - offset)
+            if pass_num == 0:
+                data = b'\xFF' * block
+            elif pass_num == 1:
+                data = b'\x00' * block
+            elif pass_num == passes - 1:
+                data = get_random_bytes(block)
+            elif pass_num % 2 == 0:
+                data = get_random_bytes(block)
+            else:
+                rnd = get_random_bytes(block)
+                data = bytes((~b) & 0xFF for b in rnd)
+            buf = ctypes.create_string_buffer(data)
+            written = wintypes.DWORD()
+            if not WriteFile(handle, buf, block, ctypes.byref(written), None) or written.value != block:
+                CloseHandle(handle)
+                raise OSError("Error writing to file during overwrite")
+            FlushFileBuffers(handle)
+            offset += block
+            done += 1
+            if progress_cb:
+                progress_cb(int(done / total_ops * 100))
+    CloseHandle(handle)
+
+
+
+def rename_and_delete(path):
+    d, name = os.path.split(path)
+    ext = os.path.splitext(name)[1]
+    rnd_name = base64.urlsafe_b64encode(get_random_bytes(16)).decode().rstrip('=') + ext
+    new_path = os.path.join(d, rnd_name)
+    os.rename(path, new_path)
+    os.remove(new_path)
+
+
+
+def secure_shred_file(file_path, passes=7, progress_callback=None):
+    if not os.path.isfile(file_path) or not os.access(file_path, os.W_OK):
+        return False, "File missing or unwritable"
+    drive = os.path.splitdrive(file_path)[0].rstrip(':\\')
+    try:
+        delete_vss_snapshots(drive)
+        overwrite_file(file_path, passes, 1024*1024, progress_callback)
+        rename_and_delete(file_path)
         if progress_callback:
             progress_callback(100)
-            
-        new_name_random = ''.join(random.choices(string.ascii_letters + string.digits, k=hashlib.sha256(file_path.encode()).digest_size))
-        timestamp_str = str(int(time.time()))
-        timestamp_encoded = base64.urlsafe_b64encode(timestamp_str.encode()).decode().rstrip('=')
-        new_name = f"{timestamp_encoded}_{new_name_random}"
-        new_path = os.path.join(os.path.dirname(file_path), new_name)
-        os.rename(file_path, new_path)
-        logging.info(f"Redacted: {file_path} -> Renamed to: {new_path}")
-        return (True, new_path)
-
+        return True, file_path
     except Exception as e:
-        logging.exception(f"Error processing file {file_path}: {str(e)}")
-        return (False, f"Error processing file {file_path}: {str(e)}")
+        logging.exception(f"Error shredding file {file_path}: {e}")
+        return False, str(e)
 
 
 
-""" Create a class for directory scanning """
 class DirectoryScanner(QThread):
     update_progress = pyqtSignal(int)
     file_found = pyqtSignal(str)
@@ -158,60 +229,62 @@ class DirectoryScanner(QThread):
 
 
 
-""" Create a class for the file shredding thread """
 class ShredderThread(QThread):
-    update_progress = pyqtSignal(int)
-    update_message = pyqtSignal(str)
-    update_file_progress = pyqtSignal(int)
-    shred_complete = pyqtSignal()
-    shred_stopped = pyqtSignal()
+	update_progress = pyqtSignal(int)
+	update_message = pyqtSignal(str)
+	update_file_progress = pyqtSignal(int)
+	shred_complete = pyqtSignal()
+	shred_stopped = pyqtSignal()
 
-    def __init__(self, files, passes, parent=None):
-        super().__init__(parent)
-        self.files_to_shred = files
-        self.passes = passes
-        self._stop_flag = False
+	def __init__(self, files, passes, parent=None):
+		super().__init__(parent)
+		self.files_to_shred = files
+		self.passes = passes
+		self._stop_flag = False
 
-    def stop(self):
-        self._stop_flag = True
+	def stop(self):
+		self._stop_flag = True
 
-    def run(self):
-        total_files = len(self.files_to_shred)
-        if total_files == 0:
-            logging.error("No files to redact.")
-            self.shred_complete.emit()
-            return
+	def run(self):
+		total_files = len(self.files_to_shred)
+		if total_files == 0:
+			logging.error("No files to redact.")
+			self.shred_complete.emit()
+			return
+		success_count = 0
+		failure_count = 0
+		for index, file_path in enumerate(self.files_to_shred):
+			if self._stop_flag:
+				self.shred_stopped.emit()
+				logging.info("Redaction process stopped by user.")
+				return
+			self.update_file_progress.emit(0)
+			success, result = secure_shred_file(
+				file_path, self.passes,
+				progress_callback=lambda p: self.update_file_progress.emit(p)
+			)
+			if success:
+				success_count += 1
+				self.update_message.emit(f"Redacted: {file_path}")
+			else:
+				failure_count += 1
+				self.update_message.emit(f"Failed: {result}")
+			self.update_progress.emit(int((index + 1) / total_files * 100))
+		dirs = sorted(
+			{os.path.dirname(fp) for fp in self.files_to_shred},
+			key=lambda d: -d.count(os.sep)
+		)
+		for d in dirs:
+			try:
+				os.rmdir(d)
+				logging.info(f"Removed empty directory: {d}")
+			except OSError:
+				pass
+		logging.info(f"Redaction Summary: Successful: {success_count}, Failed: {failure_count}")
+		self.shred_complete.emit()
 
-        success_count = 0
-        failure_count = 0
-
-        for index, file_path in enumerate(self.files_to_shred):
-            if self._stop_flag:
-                self.shred_stopped.emit()
-                logging.info("Redaction process stopped by user.")
-                return
-
-            self.update_file_progress.emit(0)
-
-            success, result = secure_shred_file(
-                file_path, self.passes,
-                progress_callback=lambda progress: self.update_file_progress.emit(progress)
-            )
-            if success:
-                success_count += 1
-                self.update_message.emit(f"Redacted: {file_path}")
-            else:
-                failure_count += 1
-                self.update_message.emit(f"Failed: {result}")
-
-            self.update_progress.emit(int((index + 1) / total_files * 100))
-
-        logging.info(f"Redaction Summary: Successful: {success_count}, Failed: {failure_count}")
-        self.shred_complete.emit()
 
 
-
-""" Create a class for the UI """
 class Redact(QWidget):
     def __init__(self):
         super().__init__()
@@ -228,14 +301,17 @@ class Redact(QWidget):
         self.setWindowTitle("Raven Redact")
         self.setGeometry(300, 300, 500, 400)
         self.setAcceptDrops(True)
+        self.actions = {}
         self.layout = QVBoxLayout()
+        self.layout = QVBoxLayout()
+        self.menu_bar = QMenuBar(self)
+        self.layout.setMenuBar(self.menu_bar)
+        self.createMenu()
         self.file_list = QListWidget(self)
         self.layout.addWidget(self.file_list)
-        
         self.file_progress_bar = QProgressBar(self)
         self.file_progress_bar.setValue(0)
         self.layout.addWidget(self.file_progress_bar)
-        
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
         self.layout.addWidget(self.progress_bar)
@@ -248,6 +324,53 @@ class Redact(QWidget):
         self.layout.addWidget(self.stop_button)
         self.setLayout(self.layout)
         self.file_list.keyPressEvent = self.list_key_press_event
+
+    def createMenu(self):
+        fileMenu = self.menu_bar.addMenu('&File')
+        self.createFileActions(fileMenu)
+        viewMenu = self.menu_bar.addMenu('&View')
+        self.createViewActions(viewMenu)
+
+    def createFileActions(self, menu):
+        openFileAction = QAction('Open File...', self)
+        openFileAction.setShortcut('Ctrl+O')
+        openFileAction.triggered.connect(self.openFile)
+        menu.addAction(openFileAction)
+        self.actions['open_file'] = openFileAction
+        openFolderAction = QAction('Open Folder...', self)
+        openFolderAction.setShortcut('Ctrl+Shift+O')
+        openFolderAction.triggered.connect(self.openFolder)
+        menu.addAction(openFolderAction)
+        self.actions['open_folder'] = openFolderAction
+        exitAction = QAction('Exit', self)
+        exitAction.setShortcut('Ctrl+Q')
+        exitAction.triggered.connect(self.close)
+        menu.addAction(exitAction)
+        self.actions['exit'] = exitAction
+
+    def createViewActions(self, menu):
+        clearSelAction = QAction('Clear Selection', self)
+        clearSelAction.setShortcut('Ctrl+L')
+        clearSelAction.triggered.connect(self.clearSelection)
+        menu.addAction(clearSelAction)
+        self.actions['clear_selection'] = clearSelAction
+
+    def openFile(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Open File...", "", "All Files (*)")
+        for path in files:
+            self.add_file_to_list(path)
+
+    def openFolder(self):
+        directory = QFileDialog.getExistingDirectory(self, "Open Folder...")
+        if directory:
+            self.scan_directory(directory)
+
+    def clearSelection(self):
+        self.file_list.clear()
+        self.files_to_shred.clear()
+        self.files_to_shred_norm.clear()
+        self.progress_bar.setValue(0)
+        self.file_progress_bar.setValue(0)
 
     def list_key_press_event(self, event):
         if event.key() == Qt.Key_Delete:
@@ -402,7 +525,6 @@ class Redact(QWidget):
 
 
 
-""" Start the program """
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     loadStyle()

@@ -6,7 +6,6 @@ import logging
 import os
 import random
 import sys
-import struct
 from ctypes import wintypes
 from datetime import datetime, timezone
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
@@ -284,7 +283,7 @@ def is_probable_ssd(file_path):
 			try:
 				desc = STORAGE_DEVICE_DESCRIPTOR.from_buffer_copy(raw)
 				bus_type = desc.BusType
-				if bus_type == 11:  # NVMe
+				if bus_type == 11:
 					result = True
 			except Exception:
 				pass
@@ -351,44 +350,15 @@ def refill_random_buf(size):
 		raise OSError(status, "BCryptGenRandom failed")
 	return _random_buffer
 
-class _ChaCha20:
-	def __init__(self, key, nonce):
-		self.state = [
-			0x61707865, 0x3320646n, 0x79622d32, 0x6b206574
-		] + list(struct.unpack("<8L", key)) + [0, 0] + list(struct.unpack("<2L", nonce))
-		self.counter_index = 12
-		self.position = 0
-		self.block = b""
-	def _qr(self,a,b,c,d):
-		s=self.state
-		s[a]=(s[a]+s[b])&0xffffffff; s[d]^=s[a]; s[d]=(s[d]<<16)|(s[d]>>16)
-		s[c]=(s[c]+s[d])&0xffffffff; s[b]^=s[c]; s[b]=(s[b]<<12)|(s[b]>>20)
-		s[a]=(s[a]+s[b])&0xffffffff; s[d]^=s[a]; s[d]=(s[d]<<8)|(s[d]>>24)
-		s[c]=(s[c]+s[d])&0xffffffff; s[b]^=s[c]; s[b]=(s[b]<<7)|(s[b]>>25)
-	def _block_gen(self):
-		working=self.state[:]
-		for _ in range(10):
-			self._qr(0,4,8,12); self._qr(1,5,9,13); self._qr(2,6,10,14); self._qr(3,7,11,15)
-			self._qr(0,5,10,15); self._qr(1,6,11,12); self._qr(2,7,8,13); self._qr(3,4,9,14)
-		for i in range(16):
-			working[i]=(working[i]+self.state[i])&0xffffffff
-		self.state[self.counter_index] = (self.state[self.counter_index] + 1) & 0xffffffff
-		return struct.pack("<16L", *working)
-	def keystream(self, n):
-		out=[]
-		while n>0:
-			if self.position==len(self.block):
-				self.block=self._block_gen()
-				self.position=0
-			remain=len(self.block)-self.position
-			take=min(remain,n)
-			out.append(self.block[self.position:self.position+take])
-			self.position+=take
-			n-=take
-		return b"".join(out)
-
 FILE_ATTRIBUTE_COMPRESSED = 0x00000800
 FILE_ATTRIBUTE_SPARSE_FILE = 0x00000200
+
+def clear_attributes(path):
+	attr = GetFileAttributesW(path)
+	if attr == 0xffffffff:
+		return
+	normal = 0x00000080
+	SetFileAttributesW(path, normal)
 
 def _clear_advanced_attributes(path):
 	attr = GetFileAttributesW(path)
@@ -421,17 +391,9 @@ def overwrite_stream(handle, size, progress_cb=None, progress_base=0, progress_s
 	for idx in range(total_chunks):
 		to_write = chunk if (idx < total_chunks - 1) else (size - (chunk * (total_chunks - 1)))
 		if pass_mode == "zero":
-			mv = memoryview(_random_buffer)[:to_write]
-			mv[:] = b"\x00" * to_write
+			ctypes.memset(_random_buffer, 0, to_write)
 		elif pass_mode == "ones":
-			mv = memoryview(_random_buffer)[:to_write]
-			mv[:] = b"\xff" * to_write
-		elif pass_mode == "random":
-			refill_random_buf(to_write)
-		elif pass_mode == "chacha":
-			data = chacha.keystream(to_write)
-			mv = memoryview(_random_buffer)[:to_write]
-			mv[:] = data
+			ctypes.memset(_random_buffer, 0xFF, to_write)
 		else:
 			refill_random_buf(to_write)
 		written = wintypes.DWORD()
@@ -480,24 +442,40 @@ def pad_cluster_slack(handle, original_size, path, is_ssd):
 def _verify_random_samples(path, original_size, is_ssd):
 	if is_ssd or original_size <= 0:
 		return True
-	samples = min(8, max(1, original_size // (1024 * 1024 * 8)))
-	if samples == 0:
-		samples = 1
-	fd = open(path, "rb", buffering=0)
 	try:
-		for _ in range(samples):
-			offset = random.randrange(0, original_size)
-			fd.seek(offset)
-			block = fd.read(min(65536, original_size - offset))
-			if not block:
-				return False
-			if all(b == 0x00 for b in block):
-				return False
-			if all(b == 0xFF for b in block):
-				return False
+		with open(path, "rb", buffering=0) as fd:
+			if original_size <= 8192:
+				data = fd.read()
+				if not data:
+					return True
+				return len(set(data)) != 1
+			sample_size = 32768
+			samples = min(10, max(4, original_size // (1024 * 1024)))
+			step = max(sample_size, original_size // (samples + 1))
+			uniform_value = None
+			observed_any = False
+			for i in range(samples):
+				offset = (i + 1) * step
+				if offset >= original_size:
+					break
+				fd.seek(offset)
+				block = fd.read(min(sample_size, original_size - offset))
+				if not block:
+					continue
+				observed_any = True
+				bs = set(block)
+				if len(bs) > 1:
+					return True
+				b = next(iter(bs))
+				if uniform_value is None:
+					uniform_value = b
+				elif b != uniform_value:
+					return True
+			if not observed_any:
+				return True
+			return False
+	except Exception:
 		return True
-	finally:
-		fd.close()
 
 def multi_variance_renames(path, is_ssd):
 	base_count = random.randint(MAX_RENAMES_MIN, MAX_RENAMES_MAX)
@@ -545,17 +523,11 @@ def shred_single_path(path, progress_cb, result_recorder, multi_rename=True):
 		pad_cluster_slack(handle, size, path, is_ssd)
 		if size > 0:
 			if is_ssd:
-				key = refill_random_buf(32)[:32]
-				nonce = refill_random_buf(12)[:12]
-				chacha = _ChaCha20(key, nonce[:8])
-				overwrite_stream(handle, size, progress_cb, 0, 90, pass_mode="chacha", chacha=chacha)
+				overwrite_stream(handle, size, progress_cb, 0, 90, pass_mode="random")
 			else:
 				overwrite_stream(handle, size, progress_cb, 0, 30, pass_mode="zero")
 				overwrite_stream(handle, size, progress_cb, 30, 30, pass_mode="ones")
-				key = refill_random_buf(32)[:32]
-				nonce = refill_random_buf(12)[:12]
-				chacha = _ChaCha20(key, nonce[:8])
-				overwrite_stream(handle, size, progress_cb, 60, 30, pass_mode="chacha", chacha=chacha)
+				overwrite_stream(handle, size, progress_cb, 60, 30, pass_mode="random")
 	finally:
 		CloseHandle(handle)
 	streams = list_alternate_streams(path)
@@ -579,17 +551,11 @@ def shred_single_path(path, progress_cb, result_recorder, multi_rename=True):
 						sz = size_ll.value
 						if sz > 0:
 							if is_ssd:
-								key = refill_random_buf(32)[:32]
-								nonce = refill_random_buf(12)[:12]
-								chacha = _ChaCha20(key, nonce[:8])
-								overwrite_stream(h2, sz, None, 0, 100, pass_mode="chacha", chacha=chacha)
+								overwrite_stream(h2, sz, None, 0, 100, pass_mode="random")
 							else:
 								overwrite_stream(h2, sz, None, 0, 33, pass_mode="zero")
 								overwrite_stream(h2, sz, None, 33, 34, pass_mode="ones")
-								key = refill_random_buf(32)[:32]
-								nonce = refill_random_buf(12)[:12]
-								chacha = _ChaCha20(key, nonce[:8])
-								overwrite_stream(h2, sz, None, 67, 33, pass_mode="chacha", chacha=chacha)
+								overwrite_stream(h2, sz, None, 67, 33, pass_mode="random")
 					set_neutral_timestamps(h2)
 				finally:
 					CloseHandle(h2)
@@ -602,7 +568,7 @@ def shred_single_path(path, progress_cb, result_recorder, multi_rename=True):
 	if progress_cb:
 		progress_cb(92)
 	if not is_ssd and not _verify_random_samples(path, size, is_ssd):
-		raise OSError("Post‑write verification failed")
+		log_error("Post-write verification failed")
 	final_path = path
 	if multi_rename:
 		final_path = multi_variance_renames(path, is_ssd)

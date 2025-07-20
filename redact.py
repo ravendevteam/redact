@@ -7,7 +7,7 @@ import os
 import random
 import sys
 from ctypes import wintypes
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
@@ -199,7 +199,7 @@ class WIN32_FIND_STREAM_DATA(ctypes.Structure):
     ]
 
 NEUTRAL_FILETIME = wintypes.FILETIME()
-_epoch_ft = int((datetime(2000,1,1,tzinfo=timezone.utc) - datetime(1601,1,1,tzinfo=timezone.utc)).total_seconds()*10**7)
+_epoch_ft = int((datetime(2000,1,1,tzinfo=UTC) - datetime(1601,1,1,tzinfo=UTC)).total_seconds()*10**7)
 NEUTRAL_FILETIME.dwLowDateTime = _epoch_ft & 0xffffffff
 NEUTRAL_FILETIME.dwHighDateTime = (_epoch_ft >> 32) & 0xffffffff
 
@@ -304,8 +304,7 @@ def list_alternate_streams(path):
         FindClose(handle)
     return res
 
-# PATCH: use writable bytearray to avoid memoryview assignment issue with ctypes char buffer
-_random_buffer = bytearray(1024 * 1024)  # 1 MiB reusable buffer
+_random_buffer = bytearray(1024 * 1024)
 
 def refill_random_buf(size):
     if size > len(_random_buffer):
@@ -315,7 +314,6 @@ def refill_random_buf(size):
     status = BCryptGenRandom(None, tmp, size, 0x00000002)
     if status != 0:
         raise OSError(status, "BCryptGenRandom failed")
-    # copy into global buffer
     _random_buffer[:size] = bytes(tmp)
     return _random_buffer
 
@@ -920,8 +918,16 @@ class Redact(QWidget):
 
     @pyqtSlot(str)
     def update_message(self, message):
-        # Placeholder hook for UI message updates (hash already logged)
-        pass
+        if not message:
+            return
+        if not (message.startswith("[REDACTED]") or message.startswith("[FAILURE]")):
+            return
+        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + "Z"
+        try:
+            self.message_log.addItem(f"{ts} {message}")
+            self.message_log.scrollToBottom()
+        except Exception:
+            pass
 
     @pyqtSlot(int)
     def update_progress(self, value):

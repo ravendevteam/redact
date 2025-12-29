@@ -7,7 +7,7 @@ Destroy files securely.
 
 When you 'delete' a file, it does not actually delete it. Instead, it marks that space as free so that new data can overwrite it later. If that space has not been overwritten, the old data is still recoverable. Redact takes it a step further, using the Redact Algorithm, to securely shred files, making them realistically unrecoverable*.
 
-* While the Redact Algorithm is designed to significantly reduce the risk of data recovery, absolute irrecoverability cannot be guaranteed in all environments. Recovery may still be possible under certain conditions, including but not limited to solid-state drives (SSD) with wear-leveling, copy-on-write filesystems, filesystem journaling, system-level caching, backups, snapshots, or advanced hardware forensic techniques. The algorithm provides best-effort logical destruction for per-file shredding, not physical media sanitization, which is beyond the scope of a desktop application.
+\* While the Redact Algorithm is designed to significantly reduce the risk of data recovery, absolute irrecoverability cannot be guaranteed in all environments. Recovery may still be possible under certain conditions, including but not limited to solid-state drives (SSD) with wear-leveling, copy-on-write filesystems, filesystem journaling, system-level caching, backups, snapshots, or advanced hardware forensic techniques. The algorithm provides best-effort logical destruction for per-file shredding, not physical media sanitization, which is beyond the scope of a desktop application.
 
 Made for Windows 11.
 

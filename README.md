@@ -28,7 +28,7 @@ A list of scenarios in which data recovery may still be possible after redaction
 ## Installation
 You can download Redact [here](https://ravendevteam.org/explore#redact).
 
-To compile from source, make sure you have Python 3.12.4, and Nuitka. Install the necessary dependencies from `requirements.txt`, then run `build.bat`.
+To compile from source, make sure you have Python 3.12.4, and Nuitka. Install the necessary dependencies from `requirements.txt`, then run `build.bat`. To get the installer, download and install Inno Setup, complete the previous installation instructions, then compile /installer/Redact.iss in Inno Setup Compiler.
 
 ## Authors & Contributors
 

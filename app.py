@@ -312,7 +312,7 @@ def main() -> int:
 	_install_qt_message_handler()
 	QCoreApplication.setOrganizationName("Raven Development Team")
 	QCoreApplication.setOrganizationDomain("ravendev.example")
-	QCoreApplication.setApplicationName("RAVEN Vault")
+	QCoreApplication.setApplicationName("RAVEN Redact")
 	qt_argv = [sys.argv[0]] + argv
 	app = QApplication(qt_argv)
 	engine = QQmlApplicationEngine()

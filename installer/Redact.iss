@@ -1,5 +1,5 @@
 #define AppName "Raven Redact"
-#define AppVersion "2.0.0.0"
+#define AppVersion "2.0.1.0"
 #define AppPublisher "Raven Development Team"
 #define AppURL "https://ravendevteam.org/"
 #define AppExeName "Redact.exe"

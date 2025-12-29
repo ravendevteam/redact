@@ -9,7 +9,7 @@ Window {
 	width: 550
 	height: 640
 	color: "transparent"
-	title: "RAVEN Vault"
+	title: "Raven Redact"
 	flags: Qt.Window | Qt.FramelessWindowHint
 
 	property int titleBarHeight: 38

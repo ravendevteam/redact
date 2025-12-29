@@ -1,0 +1,13 @@
+singleton StatusText 1.0 StatusText.qml
+singleton WindowManager 1.0 WindowManager.qml
+LoadingSpinner 1.0 LoadingSpinner.qml
+DialogWindow 1.0 DialogWindow.qml
+PrimaryButton 1.0 PrimaryButton.qml
+TextInput 1.0 TextInput.qml
+EmptyStateText 1.0 EmptyStateText.qml
+ListPanel 1.0 ListPanel.qml
+ModalDialog 1.0 ModalDialog.qml
+PanelFrame 1.0 PanelFrame.qml
+ProgressMeter 1.0 ProgressMeter.qml
+SectionHeader 1.0 SectionHeader.qml
+TextListView 1.0 TextListView.qml

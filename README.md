@@ -1,29 +1,34 @@
-<p align="center">
-  <img src="banner.png" alt="Banner" width="800">
-</p>
+# Raven Redact
 
 > [!NOTE]
-> All of our free software is designed to respect your privacy, while being as simple to use as possible. Our free software is licensed under the [BSD-3-Clause license](https://ravendevteam.org/files/BSD-3-Clause.txt). By using our software, you acknowledge and agree to the terms of the license.
+> Our free software is licensed under the [BSD-3-Clause license](https://ravendevteam.org/files/BSD-3-Clause.txt). By using our software, you acknowledge and agree to the terms of the license.
 
-File shredder with a focus on simplicity and security.
+Destroy files securely.
+
+When you 'delete' a file, it does not actually delete it. Instead, it marks that space as free so that new data can overwrite it later. If that space has not been overwritten, the old data is still recoverable. Redact takes it a step further, using the Redact Algorithm, to securely shred files, making them realistically unrecoverable*.
+
+* While the Redact Algorithm is designed to significantly reduce the risk of data recovery, absolute irrecoverability cannot be guaranteed in all environments. Recovery may still be possible under certain conditions, including but not limited to solid-state drives (SSD) with wear-leveling, copy-on-write filesystems, filesystem journaling, system-level caching, backups, snapshots, or advanced hardware forensic techniques. The algorithm provides best-effort logical destruction for per-file shredding, not physical media sanitization, which is beyond the scope of a desktop application.
 
 Made for Windows 11.
 
+## Possible Data Recovery Scenarios
+
+A list of scenarios in which data recovery may still be possible after redaction, and the threat assessment of each:
+
+|Scenario                   |Threat Level    |Notes                                                       |
+|---------------------------|----------------|------------------------------------------------------------|
+|Backups                    |**High**        |Most common real-world failure mode.                        |
+|SSD wear-leveling          |**Moderate**    |Common, but recovery is inconsistent and hardware-dependent.|
+|Snapshots / shadow copies  |**Moderate**    |Depends on configuration.                                   |
+|Filesystem journaling      |**Low/Moderate**|Requires timing, access, and incomplete overwrite.          |
+|Copy-on-write filesystems  |**Low**         |Mostly irrelevant on NTFS.                                  |
+|System-level caching       |**Low**         |Narrow window, volatile.                                    |
+|Advanced hardware forensics|**Very low**    |Nation-state / lab-level only.                              |
+
 ## Installation
-You can download Redact [here](https://ravendevteam.org/software/redact).
+You can download Redact [here](https://ravendevteam.org/explore#redact).
 
 To compile from source, make sure you have Python 3.12.4, and Nuitka. Install the necessary dependencies from `requirements.txt`, then run `build.bat`.
-
-## Screenshots
-
-![Demo Screenshot 1](https://raw.githubusercontent.com/ravendevteam/redact/refs/heads/main/demo_screenshot_1.png)
-
-## Personalize The Application
-
-To personalize the application, create **rdstyle.css** in your user folder (*ex: C:\Users\Paul\rdstyle.css*). Edit the file to include any CSS styling you want, save your changes, then restart the program. If done correctly, it should load your custom styling.
-
-> [!NOTE]
-> The UI is built with Qt5 (*PyQt5, to be specific*). You can read the documentation for Qt5 CSS styling [here](https://doc.qt.io/qt-5/stylesheet-syntax.html).
 
 ## Authors & Contributors
 

@@ -26,7 +26,7 @@ A list of scenarios in which data recovery may still be possible after redaction
 |Advanced hardware forensics|**Very low**    |Nation-state / lab-level only.                              |
 
 ## Installation
-You can download Redact [here](https://ravendevteam.org/explore#redact).
+You can download Redact [here](https://raventechnologiesgroup.com/download?product=redact).
 
 To compile from source, make sure you have Python 3.12.4, and Nuitka. Install the necessary dependencies from `requirements.txt`, then run `build.bat`. To get the installer, download and install Inno Setup, complete the previous installation instructions, then compile /installer/Redact.iss in Inno Setup Compiler.
 

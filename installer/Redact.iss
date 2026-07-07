@@ -1,7 +1,7 @@
 #define AppName "Raven Redact"
-#define AppVersion "2.0.1.0"
-#define AppPublisher "Raven Development Team"
-#define AppURL "https://ravendevteam.org/"
+#define AppVersion "2026.7.5.8"
+#define AppPublisher "Raven Technologies Group LLC"
+#define AppURL "https://raventechnologiesgroup.com/"
 #define AppExeName "Redact.exe"
 #define AppDistDir "..\\dist\\app.dist"
 

@@ -2,8 +2,9 @@ import ctypes
 import hashlib
 import logging
 import os
-import random
+import secrets
 from ctypes import wintypes
+from dataclasses import dataclass
 from datetime import datetime, UTC
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,15 @@ FlushFileBuffers.restype = wintypes.BOOL
 CloseHandle = kernel32.CloseHandle
 CloseHandle.argtypes = [wintypes.HANDLE]
 CloseHandle.restype = wintypes.BOOL
+DeleteFileW = kernel32.DeleteFileW
+DeleteFileW.argtypes = [wintypes.LPCWSTR]
+DeleteFileW.restype = wintypes.BOOL
+MoveFileExW = kernel32.MoveFileExW
+MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+MoveFileExW.restype = wintypes.BOOL
+GetFileInformationByHandle = kernel32.GetFileInformationByHandle
+GetFileInformationByHandle.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+GetFileInformationByHandle.restype = wintypes.BOOL
 GetFileSizeEx = kernel32.GetFileSizeEx
 GetFileSizeEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_longlong)]
 GetFileSizeEx.restype = wintypes.BOOL
@@ -67,6 +77,16 @@ GetDiskFreeSpaceW.argtypes = [
 	ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)
 ]
 GetDiskFreeSpaceW.restype = wintypes.BOOL
+GetVolumePathNameW = kernel32.GetVolumePathNameW
+GetVolumePathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+GetVolumePathNameW.restype = wintypes.BOOL
+GetVolumeInformationW = kernel32.GetVolumeInformationW
+GetVolumeInformationW.argtypes = [
+	wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD,
+	ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+	wintypes.LPWSTR, wintypes.DWORD
+]
+GetVolumeInformationW.restype = wintypes.BOOL
 GetFileAttributesW = kernel32.GetFileAttributesW
 GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
 GetFileAttributesW.restype = wintypes.DWORD
@@ -84,11 +104,15 @@ FormatMessageW.argtypes = [
 FormatMessageW.restype = wintypes.DWORD
 
 INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+FindStreamInfoStandard = 0
 GENERIC_WRITE = 0x40000000
 GENERIC_READ = 0x80000000
 FILE_SHARE_READ = 0x00000001
 OPEN_EXISTING = 3
+MOVEFILE_REPLACE_EXISTING = 0x00000001
 FILE_FLAG_WRITE_THROUGH = 0x80000000
+FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 FILE_ATTRIBUTE_COMPRESSED = 0x00000800
 FILE_ATTRIBUTE_SPARSE_FILE = 0x00000200
 MAX_RENAMES_MIN = 3
@@ -103,12 +127,55 @@ class WIN32_FIND_STREAM_DATA(ctypes.Structure):
 	]
 
 
+class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+	_fields_ = [
+		("dwFileAttributes", wintypes.DWORD),
+		("ftCreationTime", wintypes.FILETIME),
+		("ftLastAccessTime", wintypes.FILETIME),
+		("ftLastWriteTime", wintypes.FILETIME),
+		("dwVolumeSerialNumber", wintypes.DWORD),
+		("nFileSizeHigh", wintypes.DWORD),
+		("nFileSizeLow", wintypes.DWORD),
+		("nNumberOfLinks", wintypes.DWORD),
+		("nFileIndexHigh", wintypes.DWORD),
+		("nFileIndexLow", wintypes.DWORD)
+	]
+
+
 NEUTRAL_FILETIME = wintypes.FILETIME()
 _epoch_ft = int((datetime(2000, 1, 1, tzinfo=UTC) - datetime(1601, 1, 1, tzinfo=UTC)).total_seconds() * 10**7)
 NEUTRAL_FILETIME.dwLowDateTime = _epoch_ft & 0xffffffff
 NEUTRAL_FILETIME.dwHighDateTime = (_epoch_ft >> 32) & 0xffffffff
 
 _random_buffer = bytearray(1024 * 1024)
+
+
+@dataclass(frozen=True)
+class FilesystemPolicy:
+	name: str
+	supported: bool
+	full_redact: bool
+	support_ads: bool
+	support_hard_links: bool
+	support_resident_files: bool
+	support_sparse: bool
+	support_compression: bool
+
+
+@dataclass(frozen=True)
+class UnsupportedFilesystem:
+	path: str
+	volume_root: str
+	filesystem_name: str
+	reason: str
+
+
+FILESYSTEM_POLICIES = {
+	"NTFS": FilesystemPolicy("NTFS", True, True, True, True, True, True, True),
+	"EXFAT": FilesystemPolicy("exFAT", True, False, False, False, False, False, False),
+	"FAT32": FilesystemPolicy("FAT32", True, False, False, False, False, False, False),
+}
+SUPPORTED_FILESYSTEM_NAMES = "NTFS, exFAT, and FAT32"
 
 
 def get_last_error_message():
@@ -122,10 +189,120 @@ def get_last_error_message():
 	return f"{err}"
 
 
+def get_volume_root(path):
+	abs_path = os.path.abspath(path)
+	buf = ctypes.create_unicode_buffer(32768)
+	if not GetVolumePathNameW(abs_path, buf, len(buf)):
+		raise OSError(f"GetVolumePathNameW failed {get_last_error_message()}")
+	return buf.value
+
+
+def get_volume_filesystem_name(volume_root):
+	volume_name = ctypes.create_unicode_buffer(261)
+	filesystem_name = ctypes.create_unicode_buffer(261)
+	serial = wintypes.DWORD()
+	max_component_len = wintypes.DWORD()
+	flags = wintypes.DWORD()
+	if not GetVolumeInformationW(
+		volume_root,
+		volume_name,
+		len(volume_name),
+		ctypes.byref(serial),
+		ctypes.byref(max_component_len),
+		ctypes.byref(flags),
+		filesystem_name,
+		len(filesystem_name)
+	):
+		raise OSError(f"GetVolumeInformationW failed for {volume_root} {get_last_error_message()}")
+	return filesystem_name.value
+
+
+def policy_for_filesystem(filesystem_name):
+	return FILESYSTEM_POLICIES.get(filesystem_name.upper())
+
+
+def is_reparse_point(path):
+	attr = GetFileAttributesW(path)
+	if attr == 0xffffffff:
+		return False
+	return bool(attr & FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def collect_filesystem_policies(paths):
+	volume_cache = {}
+	path_policies = {}
+	unsupported = []
+	for path in paths:
+		abs_path = os.path.abspath(path)
+		norm = os.path.normcase(abs_path)
+		try:
+			volume_root = get_volume_root(abs_path)
+			volume_key = os.path.normcase(volume_root)
+			if volume_key not in volume_cache:
+				fs_name = get_volume_filesystem_name(volume_root)
+				volume_cache[volume_key] = (volume_root, fs_name, policy_for_filesystem(fs_name))
+			cached_root, fs_name, policy = volume_cache[volume_key]
+			if not policy or not policy.supported:
+				unsupported.append(UnsupportedFilesystem(
+					path=abs_path,
+					volume_root=cached_root,
+					filesystem_name=fs_name or "unknown",
+					reason=f"Unsupported filesystem {fs_name or 'unknown'}"
+				))
+				continue
+			path_policies[norm] = policy
+		except Exception as exc:
+			unsupported.append(UnsupportedFilesystem(
+				path=abs_path,
+				volume_root="",
+				filesystem_name="unknown",
+				reason=str(exc)
+			))
+	return path_policies, unsupported
+
+
+def _delete_file_win32(path):
+	if not DeleteFileW(path):
+		raise OSError(f"Delete failed {get_last_error_message()}")
+
+
+def _move_file_win32(source, target):
+	if not MoveFileExW(source, target, MOVEFILE_REPLACE_EXISTING):
+		raise OSError(f"Rename failed {get_last_error_message()}")
+
+
+def _get_hard_link_count(handle):
+	info = BY_HANDLE_FILE_INFORMATION()
+	if not GetFileInformationByHandle(handle, ctypes.byref(info)):
+		return None
+	return int(info.nNumberOfLinks)
+
+
+def _add_warning(result_recorder, message):
+	result_recorder.setdefault("warnings", []).append(message)
+
+
+def _random_int(min_value, max_value):
+	return min_value + secrets.randbelow(max_value - min_value + 1)
+
+
+def _random_token(length):
+	value = ""
+	while len(value) < length:
+		value += secrets.token_urlsafe(length)
+	return value[:length]
+
+
+def _split_spans(total, count):
+	base = total // count
+	remainder = total % count
+	return [base + (1 if i < remainder else 0) for i in range(count)]
+
+
 def list_alternate_streams(path):
 	res = []
 	data = WIN32_FIND_STREAM_DATA()
-	handle = FindFirstStreamW(path, 1, ctypes.byref(data), 0)
+	handle = FindFirstStreamW(path, FindStreamInfoStandard, ctypes.byref(data), 0)
 	if handle == INVALID_HANDLE_VALUE:
 		return res
 	try:
@@ -220,29 +397,48 @@ def pad_cluster_slack(handle, original_size, path, stop_flag):
 def multi_variance_renames(path, stop_flag):
 	if stop_flag.is_set():
 		return path
-	count = random.randint(MAX_RENAMES_MIN, MAX_RENAMES_MAX)
-	chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	count = _random_int(MAX_RENAMES_MIN, MAX_RENAMES_MAX)
 	dirname, name = os.path.split(path)
 	ext = os.path.splitext(name)[1]
 	current = path
 	for _ in range(count):
 		if stop_flag.is_set():
 			break
-		new_len = random.randint(12, 28)
-		rnd = "".join(random.choices(chars, k=new_len))
-		new_ext_mode = random.randint(0, 9)
+		new_len = _random_int(12, 28)
+		rnd = _random_token(new_len)
+		new_ext_mode = _random_int(0, 9)
 		if new_ext_mode == 0:
 			new_path = os.path.join(dirname, rnd)
 		elif new_ext_mode == 1:
-			new_path = os.path.join(dirname, rnd + "." + "".join(random.choices(chars.lower(), k=random.randint(2, 4))))
+			new_path = os.path.join(dirname, rnd + "." + _random_token(_random_int(2, 4)).lower())
 		else:
 			new_path = os.path.join(dirname, rnd + ext)
 		try:
-			os.rename(current, new_path)
+			_move_file_win32(current, new_path)
 			current = new_path
 		except OSError:
 			break
 	return current
+
+
+def destroy_filename_variants(path, stop_flag):
+	if stop_flag.is_set():
+		return path
+	dirname, name = os.path.split(path)
+	ext = os.path.splitext(name)[1]
+	current = path
+	for new_path in (
+		os.path.join(dirname, _random_token(96) + ext),
+		os.path.join(dirname, _random_token(8) + "." + _random_token(3).lower())
+	):
+		if stop_flag.is_set():
+			return current
+		try:
+			_move_file_win32(current, new_path)
+			current = new_path
+		except OSError:
+			return current
+	return multi_variance_renames(current, stop_flag)
 
 
 def _inflate_small_resident(handle, size, path, stop_flag):
@@ -330,21 +526,38 @@ def verify_file(handle, size, expected_digest, stop_flag, progress_cb=None, base
 	return hash_ctx.digest() == expected_digest
 
 
-def shred_single_path(path, progress_cb, result_recorder, stop_flag, allow_partial_ads, multi_rename=True, verify=True):
+def shred_single_path(path, progress_cb, result_recorder, stop_flag, allow_partial_ads, multi_rename=True, verify=True, filesystem_policy=None):
 	result_recorder["status"] = "unknown"
-	_clear_advanced_attributes(path)
+	result_recorder.setdefault("warnings", [])
+	if is_reparse_point(path):
+		result_recorder["status"] = "reparse_point_refused"
+		raise OSError("Refusing to redact reparse point")
+	policy = filesystem_policy or FILESYSTEM_POLICIES["NTFS"]
+	result_recorder["filesystem"] = policy.name
+	if not policy.full_redact:
+		_add_warning(result_recorder, f"Filesystem {policy.name} is supported, but NTFS-only protections are not available.")
+	if policy.support_sparse or policy.support_compression:
+		_clear_advanced_attributes(path)
+	else:
+		clear_attributes(path)
 	handle = CreateFileW(
 		path,
 		GENERIC_WRITE | GENERIC_READ,
 		0,
 		None,
 		OPEN_EXISTING,
-		FILE_FLAG_WRITE_THROUGH,
+		FILE_FLAG_WRITE_THROUGH | FILE_FLAG_SEQUENTIAL_SCAN,
 		None
 	)
 	if handle == INVALID_HANDLE_VALUE:
 		result_recorder["status"] = "open_failed"
 		raise OSError(f"Open failed {get_last_error_message()}")
+	if policy.support_hard_links:
+		link_count = _get_hard_link_count(handle)
+		if link_count is not None:
+			result_recorder["hard_links"] = link_count
+			if link_count > 1:
+				_add_warning(result_recorder, f"File has {link_count} hard links; data may remain accessible until every link is removed.")
 	size_ll = ctypes.c_longlong(0)
 	if not GetFileSizeEx(handle, ctypes.byref(size_ll)):
 		CloseHandle(handle)
@@ -354,22 +567,28 @@ def shred_single_path(path, progress_cb, result_recorder, stop_flag, allow_parti
 	try:
 		set_neutral_timestamps(handle)
 		pad_cluster_slack(handle, orig_size, path, stop_flag)
-		_inflate_small_resident(handle, orig_size, path, stop_flag)
+		if policy.support_resident_files:
+			_inflate_small_resident(handle, orig_size, path, stop_flag)
 		if orig_size > 0:
 			overwrite_span = 86 if verify else 96
-			per_pass = overwrite_span // OVERWRITE_PASSES
-			remainder = overwrite_span % OVERWRITE_PASSES
 			base = 0
-			digest_written = None
-			for pass_index in range(OVERWRITE_PASSES):
-				span = per_pass + (1 if pass_index < remainder else 0)
-				digest_written = overwrite_file_random(handle, orig_size, stop_flag, progress_cb, base, span)
-				base += span
 			if verify:
-				ok = verify_file(handle, orig_size, digest_written, stop_flag, progress_cb, overwrite_span, 8)
-				if not ok:
-					result_recorder["status"] = "verify_failed"
-					raise OSError("Verification failed")
+				spans = _split_spans(overwrite_span, OVERWRITE_PASSES * 2)
+				for pass_index in range(OVERWRITE_PASSES):
+					write_span = spans[pass_index * 2]
+					verify_span = spans[(pass_index * 2) + 1]
+					digest_written = overwrite_file_random(handle, orig_size, stop_flag, progress_cb, base, write_span)
+					base += write_span
+					ok = verify_file(handle, orig_size, digest_written, stop_flag, progress_cb, base, verify_span)
+					base += verify_span
+					if not ok:
+						result_recorder["status"] = "verify_failed"
+						raise OSError("Verification failed")
+			else:
+				spans = _split_spans(overwrite_span, OVERWRITE_PASSES)
+				for span in spans:
+					overwrite_file_random(handle, orig_size, stop_flag, progress_cb, base, span)
+					base += span
 		if progress_cb:
 			progress_cb(96 if verify else 98)
 	finally:
@@ -377,20 +596,23 @@ def shred_single_path(path, progress_cb, result_recorder, stop_flag, allow_parti
 	if stop_flag.is_set():
 		result_recorder["status"] = "cancelled"
 		raise RuntimeError("cancelled")
-	streams = list_alternate_streams(path)
+	streams = list_alternate_streams(path) if policy.support_ads else []
 	for s in streams:
 		if stop_flag.is_set():
 			result_recorder["status"] = "cancelled"
 			raise RuntimeError("cancelled")
 		stream_path = f"{path}:{s}"
-		_clear_advanced_attributes(stream_path)
+		if policy.support_sparse or policy.support_compression:
+			_clear_advanced_attributes(stream_path)
+		else:
+			clear_attributes(stream_path)
 		h2 = CreateFileW(
 			stream_path,
 			GENERIC_WRITE | GENERIC_READ,
 			0,
 			None,
 			OPEN_EXISTING,
-			FILE_FLAG_WRITE_THROUGH,
+			FILE_FLAG_WRITE_THROUGH | FILE_FLAG_SEQUENTIAL_SCAN,
 			None
 		)
 		if h2 == INVALID_HANDLE_VALUE:
@@ -403,37 +625,50 @@ def shred_single_path(path, progress_cb, result_recorder, stop_flag, allow_parti
 			if GetFileSizeEx(h2, ctypes.byref(size_ll2)):
 				sz = size_ll2.value
 				if sz > 0:
-					dw = None
-					for _ in range(OVERWRITE_PASSES):
-						dw = overwrite_file_random(h2, sz, stop_flag)
-					if verify and not verify_file(h2, sz, dw, stop_flag):
-						if not allow_partial_ads:
-							result_recorder["status"] = "ads_verify_failed"
-							raise OSError(f"ADS verify failed {s}")
-						else:
+					if verify:
+						ads_verify_failed = False
+						for _ in range(OVERWRITE_PASSES):
+							dw = overwrite_file_random(h2, sz, stop_flag)
+							if not verify_file(h2, sz, dw, stop_flag):
+								if not allow_partial_ads:
+									result_recorder["status"] = "ads_verify_failed"
+									raise OSError(f"ADS verify failed {s}")
+								ads_verify_failed = True
+								break
+						if ads_verify_failed:
 							continue
+					else:
+						for _ in range(OVERWRITE_PASSES):
+							overwrite_file_random(h2, sz, stop_flag)
 			set_neutral_timestamps(h2)
 		finally:
 			CloseHandle(h2)
 		try:
-			os.remove(stream_path)
+			_delete_file_win32(stream_path)
 		except OSError:
 			if not allow_partial_ads:
 				result_recorder["status"] = "ads_remove_failed"
 				raise
+	if policy.support_ads:
+		remaining_streams = list_alternate_streams(path)
+		if remaining_streams:
+			result_recorder["ads_remaining"] = len(remaining_streams)
+			if not allow_partial_ads:
+				result_recorder["status"] = "ads_delete_verify_failed"
+				raise OSError(f"ADS delete verification failed; {len(remaining_streams)} stream(s) remain")
 	if progress_cb:
 		progress_cb(98)
 	final_path = path
 	if multi_rename and not stop_flag.is_set():
-		final_path = multi_variance_renames(path, stop_flag)
+		final_path = destroy_filename_variants(path, stop_flag)
 	if stop_flag.is_set():
 		result_recorder["status"] = "cancelled"
 		raise RuntimeError("cancelled")
 	try:
-		os.remove(final_path)
+		_delete_file_win32(final_path)
 	except OSError as e:
 		result_recorder["status"] = "delete_failed"
-		raise OSError(f"Delete failed {e}")
+		raise OSError(str(e))
 	result_recorder["streams"] = len(streams)
 	result_recorder["size"] = orig_size
 	if result_recorder.get("status") not in (
@@ -442,6 +677,7 @@ def shred_single_path(path, progress_cb, result_recorder, stop_flag, allow_parti
 		"ads_open_failed",
 		"ads_verify_failed",
 		"ads_remove_failed",
+		"ads_delete_verify_failed",
 		"cancelled"
 	):
 		result_recorder["status"] = "ok"
@@ -449,13 +685,25 @@ def shred_single_path(path, progress_cb, result_recorder, stop_flag, allow_parti
 		progress_cb(100)
 
 
-def secure_shred_file(file_path, stop_flag, allow_partial_ads, progress_callback=None, verify=True):
-	rec = {}
+def secure_shred_file(file_path, stop_flag, allow_partial_ads, progress_callback=None, verify=True, filesystem_policy=None):
+	rec = {"warnings": []}
 	if not os.path.isfile(file_path):
 		rec["status"] = "missing"
 		return False, "File missing", rec
+	if is_reparse_point(file_path):
+		rec["status"] = "reparse_point_refused"
+		return False, "Refusing to redact reparse point", rec
+	policy = filesystem_policy
+	if policy is None:
+		path_policies, unsupported = collect_filesystem_policies([file_path])
+		if unsupported:
+			item = unsupported[0]
+			rec["status"] = "unsupported_filesystem"
+			rec["filesystem"] = item.filesystem_name
+			return False, f"Unsupported filesystem {item.filesystem_name}", rec
+		policy = path_policies.get(os.path.normcase(os.path.abspath(file_path)), FILESYSTEM_POLICIES["NTFS"])
 	try:
-		shred_single_path(file_path, progress_callback, rec, stop_flag, allow_partial_ads, verify=verify)
+		shred_single_path(file_path, progress_callback, rec, stop_flag, allow_partial_ads, verify=verify, filesystem_policy=policy)
 		if progress_callback:
 			progress_callback(100)
 		success = rec.get("status") == "ok"
@@ -465,5 +713,5 @@ def secure_shred_file(file_path, stop_flag, allow_partial_ads, progress_callback
 	except Exception as e:
 		if "status" not in rec:
 			rec["status"] = "exception"
-		logger.exception("Error shredding file %s: %s", file_path, e)
+		logger.exception("Error redacting file %s: %s", file_path, e)
 		return False, str(e), rec

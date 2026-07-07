@@ -5,7 +5,7 @@ from datetime import datetime, UTC
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot, pyqtProperty
 from PyQt5.QtWidgets import QFileDialog
 
-from utils.redact_utils import secure_shred_file
+from utils.redact_utils import collect_filesystem_policies, is_reparse_point, secure_shred_file
 from utils.fs_utils import remove_empty_dirs
 
 
@@ -17,6 +17,7 @@ class DirectoryScanner(QThread):
 	file_found = pyqtSignal(str)
 	scan_complete = pyqtSignal()
 	scan_error = pyqtSignal(str)
+	scan_failure = pyqtSignal(str)
 
 	def __init__(self, directory: str):
 		super().__init__()
@@ -28,9 +29,16 @@ class DirectoryScanner(QThread):
 
 	def run(self) -> None:
 		try:
-			for root, _, files in os.walk(self.directory):
+			for root, dirs, files in os.walk(self.directory):
 				if self._stop_flag.is_set():
 					break
+				for name in list(dirs):
+					if self._stop_flag.is_set():
+						break
+					path = os.path.join(root, name)
+					if is_reparse_point(path):
+						dirs.remove(name)
+						self.scan_failure.emit(f"{path} Refusing to traverse reparse point")
 				for name in files:
 					if self._stop_flag.is_set():
 						break
@@ -46,12 +54,13 @@ class ShredderThread(QThread):
 	log_message = pyqtSignal(str)
 	completed = pyqtSignal(int, int, bool)
 
-	def __init__(self, files: list[str], allow_partial_ads: bool, verify: bool):
+	def __init__(self, files: list[str], allow_partial_ads: bool, verify: bool, filesystem_policies: dict[str, object] | None = None):
 		super().__init__()
 		self._files = list(files)
 		self._stop_flag = threading.Event()
 		self.allow_partial_ads = allow_partial_ads
 		self.verify = verify
+		self.filesystem_policies = filesystem_policies or {}
 
 	def stop(self) -> None:
 		self._stop_flag.set()
@@ -67,12 +76,13 @@ class ShredderThread(QThread):
 				self.completed.emit(failures, total, True)
 				return
 			self.file_progress.emit(0)
-			success, status, _meta = secure_shred_file(
+			success, status, meta = secure_shred_file(
 				path,
 				self._stop_flag,
 				self.allow_partial_ads,
 				progress_callback=lambda p: self.file_progress.emit(p),
-				verify=self.verify
+				verify=self.verify,
+				filesystem_policy=self.filesystem_policies.get(os.path.normcase(os.path.abspath(path)))
 			)
 			if self._stop_flag.is_set():
 				self.completed.emit(failures, total, True)
@@ -83,6 +93,8 @@ class ShredderThread(QThread):
 			else:
 				failures += 1
 				self.log_message.emit(f"[FAILURE] {display_name} {status}")
+			for warning in meta.get("warnings", []):
+				self.log_message.emit(f"[WARN] {display_name} {warning}")
 			self.overall_progress.emit(int((index + 1) / total * 100))
 		self.completed.emit(failures, total, False)
 
@@ -96,6 +108,7 @@ class RedactController(QObject):
 	currentFileProgressChanged = pyqtSignal(int)
 	overallProgressChanged = pyqtSignal(int)
 	redactionCompleted = pyqtSignal(int, int, bool)
+	unsupportedFilesystemDetected = pyqtSignal(str)
 
 	def __init__(self, log_file_path: str | None = None):
 		super().__init__()
@@ -109,6 +122,8 @@ class RedactController(QObject):
 		self._allow_partial_ads = False
 		self._verify = True
 		self._folder_roots: set[str] = set()
+		self._filesystem_policies: dict[str, object] = {}
+		self._filesystem_policies_valid = False
 		self._stop_requested = False
 		self._log_file_path = self._normalize_log_path(log_file_path)
 		self._log_file_failed = False
@@ -185,6 +200,8 @@ class RedactController(QObject):
 			return
 		self._files.append(abs_path)
 		self._files_norm.add(norm)
+		self._filesystem_policies.clear()
+		self._filesystem_policies_valid = False
 		self.fileAdded.emit(abs_path)
 		self.fileCountChanged.emit(len(self._files))
 
@@ -192,8 +209,24 @@ class RedactController(QObject):
 		self._files.clear()
 		self._files_norm.clear()
 		self._folder_roots.clear()
+		self._filesystem_policies.clear()
+		self._filesystem_policies_valid = False
 		self.filesCleared.emit()
 		self.fileCountChanged.emit(0)
+
+	def _preflight_filesystems(self, show_dialog: bool = True) -> bool:
+		self._filesystem_policies.clear()
+		self._filesystem_policies_valid = False
+		policies, unsupported = collect_filesystem_policies(self._files)
+		if unsupported:
+			for item in unsupported:
+				self._emit_log(f"[FAILURE] Unsupported filesystem {item.filesystem_name} on {item.path}")
+			if show_dialog:
+				self.unsupportedFilesystemDetected.emit("One or more selected files is on an unsupported filesystem. Redact only supports NTFS, exFAT, and FAT32.")
+			return False
+		self._filesystem_policies = policies
+		self._filesystem_policies_valid = True
+		return True
 
 	def _scan_folder(self, directory: str) -> None:
 		if not directory or not os.path.isdir(directory):
@@ -204,6 +237,7 @@ class RedactController(QObject):
 		scanner.file_found.connect(self._add_file)
 		scanner.scan_complete.connect(lambda: self._on_scan_complete(scanner))
 		scanner.scan_error.connect(lambda msg: self._emit_log(f"[FAILURE] Scan error {msg}"))
+		scanner.scan_failure.connect(lambda msg: self._emit_log(f"[FAILURE] {msg}"))
 		scanner.start()
 
 	def _on_scan_complete(self, scanner: DirectoryScanner) -> None:
@@ -260,7 +294,18 @@ class RedactController(QObject):
 		if not self._files:
 			self._emit_log("[FAILURE] No files queued")
 			return
+		if not self._filesystem_policies_valid and not self._preflight_filesystems():
+			return
 		self.startShredding()
+
+	@pyqtSlot(result=bool)
+	def validateFilesystemSupport(self) -> bool:
+		if self._is_shredding:
+			return False
+		if not self._files:
+			self._emit_log("[FAILURE] No files queued")
+			return False
+		return self._preflight_filesystems()
 
 	@pyqtSlot()
 	def startShredding(self) -> None:
@@ -268,6 +313,8 @@ class RedactController(QObject):
 			return
 		if not self._files:
 			self._emit_log("[FAILURE] No files queued")
+			return
+		if not self._filesystem_policies_valid and not self._preflight_filesystems():
 			return
 		self._stop_requested = False
 		for scanner in list(self._scanners):
@@ -278,7 +325,7 @@ class RedactController(QObject):
 		self._set_current_file_progress(0)
 		self._set_overall_progress(0)
 		self._emit_log(f"[INFO] Starting redaction for {len(self._files)} files")
-		self._shredder = ShredderThread(self._files, self._allow_partial_ads, self._verify)
+		self._shredder = ShredderThread(self._files, self._allow_partial_ads, self._verify, self._filesystem_policies)
 		self._shredder.file_progress.connect(self._set_current_file_progress)
 		self._shredder.overall_progress.connect(self._set_overall_progress)
 		self._shredder.log_message.connect(self._emit_log)

@@ -57,13 +57,15 @@ Item {
 
 	function openConfirmDialog() {
 		confirmDialog.title = "Confirm Redaction"
-		confirmDialog.message = "Proceed shredding " + fileModel.count + " file" + (fileModel.count !== 1 ? "s" : "") + "? This cannot be reversed."
+		confirmDialog.message = "Proceed redacting " + fileModel.count + " file" + (fileModel.count !== 1 ? "s" : "") + "? This cannot be reversed."
 		confirmDialog.showDialog()
 	}
 
 	function handleConfirmAccepted() {
 		confirmDialog.hideDialog()
 		if (!controllerReady)
+			return
+		if (!controller.validateFilesystemSupport())
 			return
 		if (!appSettings.suppressSsdWarning) {
 			ssdDialog.checkboxChecked = false
@@ -110,6 +112,12 @@ Item {
 			failureDialog.title = "Redaction Completed With Errors"
 			failureDialog.message = failures + " of " + total + " file(s) failed to redact.\n\nSee the Log for details on each failure."
 			failureDialog.showDialog()
+		}
+
+		function onUnsupportedFilesystemDetected(message) {
+			unsupportedFilesystemDialog.title = "Unsupported Filesystem"
+			unsupportedFilesystemDialog.message = message
+			unsupportedFilesystemDialog.showDialog()
 		}
 	}
 
@@ -248,7 +256,7 @@ Item {
 			Item { Layout.fillWidth: true }
 
 			PrimaryButton {
-				text: "Shred Files"
+				text: "Redact Files"
 				Layout.preferredWidth: 112
 				enabled: root.controllerReady && !root.shreddingActive && fileModel.count > 0
 				fontFamily: interFont.name
@@ -256,7 +264,7 @@ Item {
 			}
 
 			PrimaryButton {
-				text: "Stop Shredding"
+				text: "Stop Redaction"
 				Layout.preferredWidth: 138
 				enabled: root.controllerReady && root.shreddingActive
 				fontFamily: interFont.name
@@ -298,6 +306,14 @@ Item {
 
 	DialogWindow {
 		id: failureDialog
+		fontFamily: interFont.name
+		primaryText: "OK"
+		onAccepted: hideDialog()
+		onRejected: hideDialog()
+	}
+
+	DialogWindow {
+		id: unsupportedFilesystemDialog
 		fontFamily: interFont.name
 		primaryText: "OK"
 		onAccepted: hideDialog()

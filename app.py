@@ -189,6 +189,8 @@ def _collect_paths(kv: dict[str, list[str]], keys: list[str]) -> list[str]:
 	return paths
 
 def _build_file_list(files: list[str], folders: list[str], log_line) -> list[str]:
+	from utils.redact_utils import is_reparse_point
+
 	seen = set()
 	collected: list[str] = []
 	def _on_walk_error(err):
@@ -207,7 +209,12 @@ def _build_file_list(files: list[str], folders: list[str], log_line) -> list[str
 			log_line(f"[WARN] Folder not found: {folder}")
 			continue
 		try:
-			for root, _, file_names in os.walk(folder, onerror=_on_walk_error):
+			for root, dirs, file_names in os.walk(folder, onerror=_on_walk_error):
+				for dirname in list(dirs):
+					dir_path = os.path.join(root, dirname)
+					if is_reparse_point(dir_path):
+						dirs.remove(dirname)
+						log_line(f"[FAILURE] {dir_path} Refusing to traverse reparse point")
 				for name in file_names:
 					path = os.path.join(root, name)
 					norm = os.path.normcase(os.path.abspath(path))
@@ -220,13 +227,19 @@ def _build_file_list(files: list[str], folders: list[str], log_line) -> list[str
 	return collected
 
 def _run_cli(files: list[str], folders: list[str], silent: bool, verify: bool, log_line) -> int:
-	from utils.redact_utils import secure_shred_file
+	from utils.redact_utils import collect_filesystem_policies, secure_shred_file
 
 	try:
 		file_list = _build_file_list(files, folders, log_line)
 		if not file_list:
 			log_line("[FAILURE] No files queued")
 			return EXIT_USAGE
+		filesystem_policies, unsupported = collect_filesystem_policies(file_list)
+		if unsupported:
+			for item in unsupported:
+				log_line(f"[FAILURE] Unsupported filesystem {item.filesystem_name} on {item.path}")
+			log_line("[FAILURE] One or more selected files is on an unsupported filesystem. Redact only supports NTFS, exFAT, and FAT32.")
+			return EXIT_PARTIAL
 		log_line(f"[INFO] Starting redaction for {len(file_list)} files", print_message=False)
 		stop_flag = threading.Event()
 		progress = _TerminalProgress(enabled=not silent)
@@ -239,16 +252,18 @@ def _run_cli(files: list[str], folders: list[str], silent: bool, verify: bool, l
 				progress.update(current=value, overall=overall)
 			progress.update(current=0, overall=int((index / total) * 100))
 			try:
-				success, status, _meta = secure_shred_file(
+				success, status, meta = secure_shred_file(
 					path,
 					stop_flag,
 					allow_partial_ads=False,
 					progress_callback=_progress_cb,
-					verify=verify
+					verify=verify,
+					filesystem_policy=filesystem_policies.get(os.path.normcase(os.path.abspath(path)))
 				)
 			except Exception as exc:
 				success = False
 				status = f"Exception {exc.__class__.__name__}"
+				meta = {}
 			display_name = os.path.basename(path) or path
 			if success:
 				log_line(f"[REDACTED] {display_name} {status}", print_message=False)
@@ -260,6 +275,13 @@ def _run_cli(files: list[str], folders: list[str], silent: bool, verify: bool, l
 					fail_messages.append(message)
 				elif not silent:
 					print(message)
+			for warning in meta.get("warnings", []):
+				warning_message = f"[WARN] {display_name} {warning}"
+				log_line(warning_message, print_message=False)
+				if progress.enabled:
+					fail_messages.append(warning_message)
+				elif not silent:
+					print(warning_message)
 		progress.update(current=100, overall=100)
 		if fail_messages:
 			print("\n".join(fail_messages))

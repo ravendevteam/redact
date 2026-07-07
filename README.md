@@ -25,6 +25,11 @@ A list of scenarios in which data recovery may still be possible after redaction
 |System-level caching       |**Low**         |Narrow window, volatile.                                    |
 |Advanced hardware forensics|**Very low**    |Nation-state / lab-level only.                              |
 
+## Contributing
+This repository is maintained as a read-only source mirror. We do not accept GitHub Issues or Pull Requests. If you would like to report a bug, request a feature or change, provide feedback, or suggest improvements, please submit your feedback through our [feedback form](https://raventechnologiesgroup.com/softwarefeedback).
+
+Well-documented submissions help us review requests more quickly. Due to the volume of submissions, we cannot guarantee individual responses. All submissions are reviewed by the maintainers. If a request is accepted, it will be implemented internally and included in a future update to the repository.
+
 ## Installation
 You can download Redact [here](https://raventechnologiesgroup.com/download?product=redact).
 
